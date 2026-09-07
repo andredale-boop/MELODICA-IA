@@ -1,0 +1,5 @@
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE TABLE IF NOT EXISTS users (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS projects (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE, title TEXT NOT NULL, style TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS jobs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE, project_id UUID REFERENCES projects(id) ON DELETE SET NULL, mode TEXT NOT NULL, prompt TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'QUEUED', reserved_credits INTEGER NOT NULL, settled_credits INTEGER NOT NULL DEFAULT 0, provider_job_id TEXT, asset_url TEXT, error TEXT, idempotency_key TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE UNIQUE INDEX IF NOT EXISTS jobs_user_idempotency_idx ON jobs(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
