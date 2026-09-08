@@ -140,9 +140,7 @@ app.get('/v1/assets/:jobId',auth,async(req:Req,res)=>{
   return res.redirect(302,raw);
  }
 
- const filename=raw.startsWith(internalPrefix)
-  ? decodeURIComponent(new URL(raw).pathname.split('/').pop()??'')
-  : path.basename(raw);
+ const filename = `${req.params.jobId}.wav`;
 
  const file=path.join(assetsDir,filename);
  if(!existsSync(file)||!filename||filename!==path.basename(filename))
