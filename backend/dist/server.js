@@ -254,11 +254,16 @@ app.get('/v1/assets/:jobId', auth, async (req, res) => {
     if (!r.rowCount)
         return res.status(404).json({ error: 'ASSET_NOT_FOUND' });
     const raw = String(r.rows[0].asset_url ?? '');
-    if (/^https:\/\//i.test(raw))
+    const base = (process.env.PUBLIC_BASE_URL ?? `http://localhost:${process.env.PORT ?? 8080}`).replace(/\/$/, '');
+    const internalPrefix = `${base}/v1/assets/`;
+    if (/^https?:\/\//i.test(raw) && !raw.startsWith(internalPrefix)) {
         return res.redirect(302, raw);
-    const filename = path.basename(raw);
+    }
+    const filename = raw.startsWith(internalPrefix)
+        ? decodeURIComponent(new URL(raw).pathname.split('/').pop() ?? '')
+        : path.basename(raw);
     const file = path.join(assetsDir, filename);
-    if (!existsSync(file) || filename !== raw)
+    if (!existsSync(file) || !filename || filename !== path.basename(filename))
         return res.status(404).json({ error: 'ASSET_FILE_NOT_FOUND' });
     res.sendFile(file);
 });

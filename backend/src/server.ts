@@ -129,14 +129,28 @@ app.get('/v1/generations/:id',auth,async(req:Req,res)=>{if(!pool)return res.stat
 
 app.get('/v1/assets/:jobId',auth,async(req:Req,res)=>{
  if(!pool)return res.status(503).json({error:'DATABASE_NOT_CONFIGURED'});
- const r=await pool.query('SELECT asset_url FROM jobs WHERE id=$1 AND user_id=$2 AND status=\'SUCCEEDED\'',[req.params.jobId,req.userId]);
+ const r=await pool.query('SELECT asset_url FROM jobs WHERE id=$1 AND user_id=$2 AND status=\'SUCCEEDED\'', [req.params.jobId,req.userId]);
  if(!r.rowCount)return res.status(404).json({error:'ASSET_NOT_FOUND'});
+
  const raw=String(r.rows[0].asset_url??'');
- if(/^https:\/\//i.test(raw)) return res.redirect(302,raw);
- const filename=path.basename(raw); const file=path.join(assetsDir,filename);
- if(!existsSync(file)||filename!==raw)return res.status(404).json({error:'ASSET_FILE_NOT_FOUND'});
+ const base=(process.env.PUBLIC_BASE_URL??`http://localhost:${process.env.PORT??8080}`).replace(/\/$/,'');
+ const internalPrefix=`${base}/v1/assets/`;
+
+ if(/^https?:\/\//i.test(raw) && !raw.startsWith(internalPrefix)){
+  return res.redirect(302,raw);
+ }
+
+ const filename=raw.startsWith(internalPrefix)
+  ? decodeURIComponent(new URL(raw).pathname.split('/').pop()??'')
+  : path.basename(raw);
+
+ const file=path.join(assetsDir,filename);
+ if(!existsSync(file)||!filename||filename!==path.basename(filename))
+  return res.status(404).json({error:'ASSET_FILE_NOT_FOUND'});
+
  res.sendFile(file);
 });
+
 app.post('/v1/generations/:id/cancel',auth,async(req:Req,res)=>{if(!pool)return res.status(503).json({error:'DATABASE_NOT_CONFIGURED'});const c=await pool.connect();try{await c.query('BEGIN');const r=await c.query(`SELECT id,status,reserved_credits FROM jobs WHERE id=$1 AND user_id=$2 FOR UPDATE`,[req.params.id,req.userId]);if(!r.rowCount||!['QUEUED','RUNNING'].includes(r.rows[0].status)){await c.query('ROLLBACK');return res.status(404).json({error:'JOB_NOT_FOUND_OR_NOT_CANCELABLE'});}await settleCreditsTx(c,req.userId!,r.rows[0].reserved_credits,0,`cancel-${r.rows[0].id}`);await c.query(`UPDATE jobs SET status='CANCELED',updated_at=now(),completed_at=now() WHERE id=$1`,[r.rows[0].id]);await c.query('COMMIT');return res.status(202).json({status:'CANCELED',id:r.rows[0].id});}catch(e){await c.query('ROLLBACK');return res.status(409).json({error:'CANCEL_FAILED'});}finally{c.release();}});
 
 const port=Number(process.env.PORT??8080);app.listen(port,()=>console.log(`MELODICA API listening on :${port}`));
