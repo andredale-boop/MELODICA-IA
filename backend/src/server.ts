@@ -88,19 +88,18 @@ async function runJob(jobId:string){
    form.append('model','stable-audio-2.5');
    form.append('duration','30');
    form.append('output_format','wav');
-   const start=await fetch('https://api.stability.ai/v2beta/audio/stable-audio/text-to-audio',{method:'POST',headers:{'Authorization':`Bearer ${process.env.STABILITY_API_KEY}`,'Accept':'application/json'},body:form});
-   if(!start.ok){const detail=await start.text();throw new Error(`STABILITY_HTTP_${start.status}:${detail.slice(0,500)}`);}
-   const started:any=await start.json();
-   if(!started.id)throw new Error('STABILITY_RESPONSE_MISSING_ID');
-   let audio:Response|undefined;
-   for(let i=0;i<150;i++){
-    await new Promise(r=>setTimeout(r,2000));
-    const result=await fetch(`https://api.stability.ai/v2beta/audio/results/${started.id}`,{headers:{'Authorization':`Bearer ${process.env.STABILITY_API_KEY}`,'Accept':'audio/*'}});
-    if(result.status===202)continue;
-    if(!result.ok)throw new Error(`STABILITY_RESULT_HTTP_${result.status}`);
-    audio=result; break;
-   }
-   if(!audio)throw new Error('STABILITY_TIMEOUT');
+
+   const audio=await fetch('https://api.stability.ai/v2beta/audio/stable-audio-2/text-to-audio',{
+    method:'POST',
+    headers:{
+     'Authorization':`Bearer ${process.env.STABILITY_API_KEY}`,
+     'Accept':'audio/*'
+    },
+    body:form
+   });
+
+   if(!audio.ok)throw new Error(`STABILITY_HTTP_${audio.status}:${await audio.text()}`);
+
    const filename=`${jobId}.wav`;
    await writeFile(path.join(assetsDir,filename),Buffer.from(await audio.arrayBuffer()));
    assetPath=filename;
