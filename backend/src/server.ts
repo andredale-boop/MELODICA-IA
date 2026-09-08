@@ -88,7 +88,7 @@ async function runJob(jobId:string){
    form.append('model','stable-audio-3');
    form.append('duration','30');
    form.append('output_format','wav');
-   const start=await fetch('https://api.stability.ai/v2beta/audio/stable-audio/text-to-audio',{method:'POST',headers:{'Authorization':`Bearer ${process.env.STABILITY_API_KEY}`},body:form});
+   const start=await fetch('https://api.stability.ai/v2beta/audio/stable-audio/text-to-audio',{method:'POST',headers:{'Authorization':`Bearer ${process.env.STABILITY_API_KEY}`,'Accept':'application/json'},body:form});
    if(!start.ok){const detail=await start.text();throw new Error(`STABILITY_HTTP_${start.status}:${detail.slice(0,500)}`);}
    const started:any=await start.json();
    if(!started.id)throw new Error('STABILITY_RESPONSE_MISSING_ID');
