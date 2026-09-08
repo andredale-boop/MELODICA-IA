@@ -148,7 +148,36 @@ async function runJob(jobId) {
     const j = claim.rows[0];
     try {
         let assetPath;
-        if (providerGateway) {
+        if (process.env.STABILITY_API_KEY) {
+            const form = new FormData();
+            form.append('prompt', j.prompt);
+            form.append('model', 'stable-audio-3');
+            form.append('duration', '30');
+            form.append('output_format', 'wav');
+            const start = await fetch('https://api.stability.ai/v2beta/audio/stable-audio/text-to-audio', { method: 'POST', headers: { 'Authorization': `Bearer ${process.env.STABILITY_API_KEY}` }, body: form });
+            if (!start.ok)
+                throw new Error(`STABILITY_HTTP_${start.status}`);
+            const started = await start.json();
+            if (!started.id)
+                throw new Error('STABILITY_RESPONSE_MISSING_ID');
+            let audio;
+            for (let i = 0; i < 150; i++) {
+                await new Promise(r => setTimeout(r, 2000));
+                const result = await fetch(`https://api.stability.ai/v2beta/audio/results/${started.id}`, { headers: { 'Authorization': `Bearer ${process.env.STABILITY_API_KEY}`, 'Accept': 'audio/*' } });
+                if (result.status === 202)
+                    continue;
+                if (!result.ok)
+                    throw new Error(`STABILITY_RESULT_HTTP_${result.status}`);
+                audio = result;
+                break;
+            }
+            if (!audio)
+                throw new Error('STABILITY_TIMEOUT');
+            const filename = `${jobId}.wav`;
+            await writeFile(path.join(assetsDir, filename), Buffer.from(await audio.arrayBuffer()));
+            assetPath = filename;
+        }
+        else if (providerGateway) {
             const resp = await fetch(`${providerGateway}/v1/generations`, { method: 'POST', headers: { 'content-type': 'application/json', ...(providerKey ? { 'authorization': `Bearer ${providerKey}` } : {}) }, body: JSON.stringify({ mode: j.mode, prompt: j.prompt, jobId: j.id }) });
             if (!resp.ok)
                 throw new Error(`PROVIDER_HTTP_${resp.status}`);
