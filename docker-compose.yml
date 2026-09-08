@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: melodica
+      POSTGRES_USER: melodica
+      POSTGRES_PASSWORD: change-me
+    ports: ["5432:5432"]
+    volumes: ["melodica_pg:/var/lib/postgresql/data"]
+  api:
+    build: ./backend
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+      JWT_SECRET: change-this-to-a-long-random-secret
+      DATABASE_URL: postgresql://melodica:change-me@db:5432/melodica
+      DATABASE_SSL: "false"
+      CORS_ORIGIN: http://localhost:8080
+      ALLOW_LOCAL_DEMO: "true"
+      ASSETS_DIR: /app/assets
+      PUBLIC_BASE_URL: http://localhost:8080
+    ports: ["8080:8080"]
+    depends_on: [db]
+volumes:
+  melodica_pg:
