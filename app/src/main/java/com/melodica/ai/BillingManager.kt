@@ -11,6 +11,7 @@ import com.android.billingclient.api.PendingPurchasesParams
 import com.android.billingclient.api.ProductDetails
 import com.android.billingclient.api.Purchase
 import com.android.billingclient.api.QueryProductDetailsParams
+import com.android.billingclient.api.QueryPurchasesParams
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -60,8 +61,18 @@ class BillingManager(
         client.startConnection(object : BillingClientStateListener {
             override fun onBillingServiceDisconnected() { onMessage("Google Play non disponibile. Riprova.") }
             override fun onBillingSetupFinished(result: BillingResult) {
-                if (result.responseCode == BillingClient.BillingResponseCode.OK) queryProducts(onReady)
-                else onMessage("Billing non disponibile: ${result.debugMessage}")
+                if (result.responseCode == BillingClient.BillingResponseCode.OK) {
+                    client.queryPurchasesAsync(
+                        QueryPurchasesParams.newBuilder()
+                            .setProductType(BillingClient.ProductType.INAPP)
+                            .build()
+                    ) { purchasesResult, purchases ->
+                        handlePurchases(purchasesResult, purchases)
+                        queryProducts(onReady)
+                    }
+                } else {
+                    onMessage("Billing non disponibile: ${result.debugMessage}")
+                }
             }
         })
     }

@@ -26,7 +26,8 @@ interface MelodicaBackend {
     suspend fun getCredits(): Credits
     suspend fun getProjects(): List<RemoteProject>
     suspend fun createProject(title: String, style: String): RemoteProject
-    suspend fun createGeneration(projectId: String, mode: String, prompt: String, idempotencyKey: String = UUID.randomUUID().toString()): String
+    suspend fun createGeneration(projectId: String, mode: String, prompt: String, idempotencyKey: String): String
+    suspend fun rewriteText(text: String, action: String, style: String): String
     suspend fun getJobStatus(jobId: String): GenerationJob
     suspend fun cancelJob(jobId: String)
     suspend fun deleteAccount()
@@ -97,13 +98,22 @@ class ApiBackend(
         return RemoteProject(o.getString("id"), o.getString("title"), o.getString("style"))
     }
 
-    override suspend fun createGeneration(projectId: String, mode: String, prompt: String, idempotencyKey: String = UUID.randomUUID().toString()): String {
+    override suspend fun createGeneration(projectId: String, mode: String, prompt: String, idempotencyKey: String): String {
         val body = JSONObject()
             .put("projectId", projectId)
             .put("mode", mode)
             .put("prompt", prompt)
-            .put("idempotencyKey", UUID.randomUUID().toString())
+            .put("idempotencyKey", idempotencyKey)
         return request("POST", "/v1/generations", body).getString("id")
+    }
+
+    override suspend fun rewriteText(text: String, action: String, style: String): String {
+        val body = JSONObject()
+            .put("text", text)
+            .put("action", action)
+            .put("style", style)
+
+        return request("POST", "/v1/ai/rewrite", body).getString("text")
     }
 
     override suspend fun getJobStatus(jobId: String): GenerationJob {

@@ -4,6 +4,8 @@ package com.melodica.ai
 
 import android.app.Activity
 import android.content.Context
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import android.media.MediaPlayer
 import android.os.Bundle
 import java.io.File
@@ -35,6 +37,12 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.*
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -85,13 +93,46 @@ data class Project(
 )
 
 class SessionStore(context: Context) {
-    private val prefs = context.getSharedPreferences("melodica_session", Context.MODE_PRIVATE)
+    private val legacyPrefs =
+        context.getSharedPreferences("melodica_session", Context.MODE_PRIVATE)
+
+    private val prefs = EncryptedSharedPreferences.create(
+        context,
+        "melodica_secure_session",
+        MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build(),
+        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+    )
+
+    init {
+        // Migrate an existing session from the old unencrypted storage once.
+        val oldToken = legacyPrefs.getString("token", null)
+        val oldEmail = legacyPrefs.getString("email", null)
+
+        if (prefs.getString("token", null) == null && !oldToken.isNullOrBlank()) {
+            prefs.edit().putString("token", oldToken).apply()
+            if (!oldEmail.isNullOrBlank()) {
+                prefs.edit().putString("email", oldEmail).apply()
+            }
+            legacyPrefs.edit().clear().apply()
+        }
+    }
+
     var token: String?
         get() = prefs.getString("token", null)
-        set(value) { prefs.edit().apply { if (value == null) remove("token") else putString("token", value) }.apply() }
+        set(value) {
+            prefs.edit().apply {
+                if (value == null) remove("token") else putString("token", value)
+            }.apply()
+        }
+
     var email: String?
         get() = prefs.getString("email", null)
-        set(value) { prefs.edit().putString("email", value ?: "").apply() }
+        set(value) {
+            prefs.edit().putString("email", value ?: "").apply()
+        }
 }
 
 class LocalStore(private val context: Context) {
@@ -100,6 +141,8 @@ class LocalStore(private val context: Context) {
     var serverCredits by mutableIntStateOf(prefs.getInt("server_credits", 0)); private set
     var isPlaying by mutableStateOf(false); private set
     private var player: MediaPlayer? = null
+    private val playerScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var playbackJob: Job? = null
 
     private fun loadProjects(): List<Project> = runCatching {
         val a = JSONArray(prefs.getString("projects", "[]"))
@@ -143,25 +186,102 @@ class LocalStore(private val context: Context) {
     fun setCredits(value: Int) { serverCredits = value; persist() }
 
     fun togglePlayback(project: Project, token: String?) {
-        if (isPlaying) { player?.stop(); player?.release(); player = null; isPlaying = false; return }
-        Thread {
+        if (isPlaying) {
+            playbackJob?.cancel()
+            playbackJob = null
+            player?.runCatching { stop() }
+            player?.release()
+            player = null
+            isPlaying = false
+            return
+        }
+
+        playbackJob?.cancel()
+        playbackJob = playerScope.launch {
             try {
-                val file = File(context.cacheDir, "${project.id}.wav")
-                if (project.assetUrl != null) downloadAsset(project.assetUrl, token, file) else if (!file.exists()) createTone(file)
-                runOnMain {
-                    player = MediaPlayer().apply { setDataSource(file.absolutePath); setOnCompletionListener { this@LocalStore.isPlaying = false; release() }; prepare(); start() }
-                    isPlaying = true
+                isPlaying = false
+
+                val file = withContext(Dispatchers.IO) {
+                    val target = File(context.cacheDir, "${project.id}.wav")
+
+                    if (project.assetUrl != null) {
+                        val part = File(context.cacheDir, "${project.id}.wav.part")
+                        part.delete()
+                        downloadAsset(project.assetUrl, token, part)
+
+                        if (!part.exists() || part.length() < 44L) {
+                            part.delete()
+                            error("AUDIO_FILE_INVALID")
+                        }
+
+                        if (target.exists()) target.delete()
+
+                        if (!part.renameTo(target)) {
+                            part.copyTo(target, overwrite = true)
+                            part.delete()
+                        }
+                    } else if (!target.exists() || target.length() < 44L) {
+                        createTone(target)
+                    }
+
+                    target
                 }
-            } catch (_: Exception) { runOnMain { isPlaying = false } }
-        }.start()
+
+
+                player?.runCatching { stop() }
+                player?.release()
+
+                player = MediaPlayer().apply {
+                    setDataSource(file.absolutePath)
+                    setOnCompletionListener {
+                        this@LocalStore.isPlaying = false
+                        it.release()
+                        if (player === it) player = null
+                        playbackJob = null
+                    }
+                    setOnErrorListener { mp, _, _ ->
+                        this@LocalStore.isPlaying = false
+                        mp.release()
+                        if (player === mp) player = null
+                        playbackJob = null
+                        true
+                    }
+                    prepare()
+                    start()
+                }
+
+                isPlaying = true
+            } catch (_: kotlinx.coroutines.CancellationException) {
+                isPlaying = false
+            } catch (_: Throwable) {
+                isPlaying = false
+                player?.runCatching { release() }
+                player = null
+            }
+        }
     }
 
     private fun downloadAsset(assetUrl: String, token: String?, file: File) {
         val conn = (URL(assetUrl).openConnection() as HttpURLConnection)
-        conn.connectTimeout = 10_000; conn.readTimeout = 30_000
-        token?.let { conn.setRequestProperty("Authorization", "Bearer $it") }
-        if (conn.responseCode !in 200..299) error("ASSET_HTTP_${conn.responseCode}")
-        conn.inputStream.use { input -> file.outputStream().use { output -> input.copyTo(output) } }
+        try {
+            conn.connectTimeout = 10_000
+            conn.readTimeout = 30_000
+            conn.requestMethod = "GET"
+            token?.let { conn.setRequestProperty("Authorization", "Bearer $it") }
+
+            if (conn.responseCode !in 200..299) {
+                error("ASSET_HTTP_${conn.responseCode}")
+            }
+
+            conn.inputStream.use { input ->
+                file.outputStream().use { output ->
+                    input.copyTo(output)
+                    output.flush()
+                }
+            }
+        } finally {
+            conn.disconnect()
+        }
     }
 
     private fun runOnMain(block: () -> Unit) { android.os.Handler(context.mainLooper).post(block) }
@@ -207,7 +327,7 @@ class MainActivity : ComponentActivity() {
             busy = busy,
             error = error,
             onLogin = { email, password ->
-                scope.launch {
+                scope.launch(Dispatchers.IO) {
                     busy = true; error = null
                     try { val user = api.login(email, password); session.email = user.email; store.setCredits(api.getCredits().balance); store.replaceProjects(api.getProjects()); loggedIn = true }
                     catch (t: Throwable) { error = friendlyError(t) }
@@ -215,7 +335,7 @@ class MainActivity : ComponentActivity() {
                 }
             },
             onRegister = { email, password ->
-                scope.launch {
+                scope.launch(Dispatchers.IO) {
                     busy = true; error = null
                     try { val user = api.register(email, password); session.email = user.email; store.setCredits(api.getCredits().balance); store.replaceProjects(api.getProjects()); loggedIn = true }
                     catch (t: Throwable) { error = friendlyError(t) }
@@ -226,7 +346,7 @@ class MainActivity : ComponentActivity() {
         return
     }
     LaunchedEffect(loggedIn) {
-        try { api.me(); store.setCredits(api.getCredits().balance); store.replaceProjects(api.getProjects()); billing.connect() } catch (_: Throwable) { session.token = null; loggedIn = false }
+        try { api.me(); store.setCredits(api.getCredits().balance); store.replaceProjects(api.getProjects()); billing.connect() } catch (t: Throwable) { error = t.message ?: t.toString() }
     }
     DisposableEffect(Unit) { onDispose { billing.endConnection() } }
     MelodicaApp(store, api, session, billing, onLogout = { api.logout(); session.email = null; loggedIn = false })
@@ -293,19 +413,126 @@ private fun friendlyError(t: Throwable): String {
 }
 
 @Composable fun Create(nav: NavHostController, store: LocalStore, api: MelodicaBackend, snackbar: SnackbarHostState, scope: kotlinx.coroutines.CoroutineScope, onCreated: (Project) -> Unit) {
-    var title by remember { mutableStateOf("") }; var lyrics by remember { mutableStateOf("") }; var style by remember { mutableStateOf("Pop") }; var show by remember { mutableStateOf(false) }; var busy by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        Text("Crea il tuo brano", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold); Text("Collegato al backend MELODICA IA.")
-        OutlinedTextField(title, { title = it }, label = { Text("Titolo") }, modifier = Modifier.fillMaxWidth(), singleLine = true); OutlinedTextField(lyrics, { lyrics = it }, label = { Text("Testo / idea") }, modifier = Modifier.fillMaxWidth().height(180.dp))
-        ExposedDropdownMenuBox(expanded = show, onExpandedChange = { show = !show }) { OutlinedTextField(style, {}, readOnly = true, label = { Text("Stile") }, trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(show) }, modifier = Modifier.menuAnchor().fillMaxWidth()); ExposedDropdownMenu(show, { show = false }) { listOf("Pop", "EDM", "Dance", "Rock", "Hip-Hop", "Cinematic").forEach { s -> DropdownMenuItem(text = { Text(s) }, onClick = { style = s; show = false }) } } }
-        Button(enabled = !busy, onClick = {
-            scope.launch {
-                busy = true
-                try { val r = api.createProject(title.ifBlank { "Nuovo progetto" }, style); onCreated(store.addProject(r.title, r.style, lyrics, r.id)) }
-                catch (t: Throwable) { snackbar.showSnackbar(friendlyError(t)) }
-                busy = false
+    var title by remember { mutableStateOf("") }
+    var lyrics by remember { mutableStateOf("") }
+    var style by remember { mutableStateOf("") }
+    var aiAction by remember { mutableStateOf("CORRECT") }
+    var aiMenu by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    var aiBusy by remember { mutableStateOf(false) }
+
+    val aiActions = listOf(
+        "CORRECT" to "Correggi testo",
+        "RHYME" to "Migliora rime",
+        "SINGABLE" to "Rendi piu cantabile",
+        "POWERFUL" to "Rendi piu potente",
+        "SHORTEN" to "Accorcia",
+        "LENGTHEN" to "Allunga",
+        "ADAPT_STYLE" to "Adatta allo stile",
+        "REWRITE" to "Riscrivi"
+    )
+
+    Column(
+        Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text("Crea il tuo brano", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text("Scrivi liberamente il genere musicale che vuoi.")
+
+        OutlinedTextField(
+            value = title,
+            onValueChange = { title = it },
+            label = { Text("Titolo") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        OutlinedTextField(
+            value = style,
+            onValueChange = { style = it },
+            label = { Text("Stile musicale") },
+            placeholder = { Text("Es. dark trap italiano, EDM festival, rock anni 80") },
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        OutlinedTextField(
+            value = lyrics,
+            onValueChange = { lyrics = it },
+            label = { Text("Testo / Lyrics") },
+            placeholder = { Text("Scrivi qui il testo della canzone...") },
+            minLines = 8,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Box(Modifier.fillMaxWidth()) {
+            OutlinedButton(
+                enabled = !aiBusy && lyrics.isNotBlank(),
+                onClick = { aiMenu = true },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("IA: ${aiActions.first { it.first == aiAction }.second}")
             }
-        }, modifier = Modifier.fillMaxWidth()) { Text(if (busy) "Creazione…" else "Crea progetto sul cloud") }
+
+            DropdownMenu(
+                expanded = aiMenu,
+                onDismissRequest = { aiMenu = false }
+            ) {
+                aiActions.forEach { (action, label) ->
+                    DropdownMenuItem(
+                        text = { Text(label) },
+                        onClick = {
+                            aiAction = action
+                            aiMenu = false
+                        }
+                    )
+                }
+            }
+        }
+
+        Button(
+            enabled = !aiBusy && lyrics.isNotBlank(),
+            onClick = {
+                aiBusy = true
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        lyrics = api.rewriteText(
+                            lyrics,
+                            aiAction,
+                            style.ifBlank { "Pop" }
+                        )
+                        snackbar.showSnackbar("Testo elaborato con IA")
+                    } catch (t: Throwable) {
+                        snackbar.showSnackbar(friendlyError(t))
+                    } finally {
+                        aiBusy = false
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(if (aiBusy) "IA al lavoro..." else "Elabora testo con IA")
+        }
+
+        Button(
+            enabled = !busy && title.isNotBlank() && lyrics.isNotBlank(),
+            onClick = {
+                scope.launch(Dispatchers.IO) {
+                    busy = true
+                    try {
+                        val finalStyle = style.ifBlank { "Pop" }
+                        val r = api.createProject(title.trim(), finalStyle.trim())
+                        onCreated(store.addProject(r.title, r.style, lyrics, r.id))
+                    } catch (t: Throwable) {
+                        snackbar.showSnackbar(friendlyError(t))
+                    } finally {
+                        busy = false
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(if (busy) "Creazione..." else "Crea progetto")
+        }
     }
 }
 
@@ -330,9 +557,9 @@ private fun friendlyError(t: Throwable): String {
 private fun launchRemoteGeneration(store: LocalStore, api: MelodicaBackend, project: Project, label: String, cost: Int, snackbar: SnackbarHostState, scope: kotlinx.coroutines.CoroutineScope) {
     val remoteId = project.remoteId
     val mode = generationModes[label]
-    if (remoteId == null || mode == null) { scope.launch { snackbar.showSnackbar("Progetto o modalità non disponibili") }; return }
+    if (remoteId == null || mode == null) { scope.launch(Dispatchers.IO) { snackbar.showSnackbar("Progetto o modalità non disponibili") }; return }
     val idempotencyKey = UUID.randomUUID().toString()
-    scope.launch {
+    scope.launch(Dispatchers.IO) {
         try {
             val jobId = api.createGeneration(remoteId, mode, "${project.title}\nStile: ${project.style}\n$label\n${project.lyrics}", idempotencyKey)
             store.update(project.id, "In coda • $label", 5); snackbar.showSnackbar("Job avviato: $label")
@@ -356,12 +583,12 @@ private fun statusLabel(status: String, label: String) = when (status) { "QUEUED
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text("Crediti", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp)) { Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) { Text("Saldo server", style = MaterialTheme.typography.labelLarge); Text("${store.serverCredits} crediti", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold); Text("Il saldo è verificato dal server MELODICA IA.") } }
-        OutlinedButton(onClick = { scope.launch { try { store.setCredits(api.getCredits().balance) } catch (t: Throwable) { snackbar.showSnackbar(friendlyError(t)) } } }, modifier = Modifier.fillMaxWidth()) { Text("Aggiorna saldo") }
+        OutlinedButton(onClick = { scope.launch(Dispatchers.IO) { try { store.setCredits(api.getCredits().balance) } catch (t: Throwable) { snackbar.showSnackbar(friendlyError(t)) } } }, modifier = Modifier.fillMaxWidth()) { Text("Aggiorna saldo") }
         Text("Acquista crediti", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         listOf("credits_500" to "500 crediti", "credits_1500" to "1500 crediti", "credits_5000" to "5000 crediti").forEach { (id, label) -> Button(enabled = activity != null, onClick = { activity?.let { billing.buy(it, id) } }, modifier = Modifier.fillMaxWidth()) { Text(label) } }
         Text("Gli acquisti vengono accreditati solo dopo verifica server-side di Google Play.", style = MaterialTheme.typography.bodySmall)
         HorizontalDivider()
         OutlinedButton(onClick = { confirmDelete = true }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Elimina account e dati") }
     }
-    if (confirmDelete) AlertDialog(onDismissRequest = { confirmDelete = false }, title = { Text("Eliminare l’account?") }, text = { Text("L’operazione elimina account, progetti e crediti associati e non può essere annullata.") }, confirmButton = { TextButton(onClick = { confirmDelete = false; scope.launch { try { api.deleteAccount(); onAccountDeleted() } catch (t: Throwable) { snackbar.showSnackbar(friendlyError(t)) } } }) { Text("Elimina", color = MaterialTheme.colorScheme.error) } }, dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Annulla") } })
+    if (confirmDelete) AlertDialog(onDismissRequest = { confirmDelete = false }, title = { Text("Eliminare l’account?") }, text = { Text("L’operazione elimina account, progetti e crediti associati e non può essere annullata.") }, confirmButton = { TextButton(onClick = { confirmDelete = false; scope.launch(Dispatchers.IO) { try { api.deleteAccount(); onAccountDeleted() } catch (t: Throwable) { snackbar.showSnackbar(friendlyError(t)) } } }) { Text("Elimina", color = MaterialTheme.colorScheme.error) } }, dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Annulla") } })
 }

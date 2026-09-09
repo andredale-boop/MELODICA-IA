@@ -39,7 +39,71 @@ function hashPassword(password) { const salt = randomBytes(16).toString('hex'); 
 function verifyPassword(password, stored) { const [kind, salt, hash] = stored.split(':'); if (kind !== 'scrypt' || !salt || !hash)
     return false; const a = Buffer.from(hash, 'hex'); const b = scryptSync(password, salt, 64); return a.length === b.length && timingSafeEqual(a, b); }
 const credentials = z.object({ email: z.string().email().max(254), password: z.string().min(8).max(128) });
+const aiRewriteSchema = z.object({
+    text: z.string().min(1).max(12000),
+    action: z.enum(['CORRECT', 'RHYME', 'SINGABLE', 'POWERFUL', 'SHORTEN', 'LENGTHEN', 'ADAPT_STYLE', 'REWRITE']),
+    style: z.string().min(1).max(200).default('Pop')
+});
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'melodica-api', version: '1.4.0' }));
+app.post('/v1/ai/rewrite', auth, async (req, res) => {
+    const p = aiRewriteSchema.safeParse(req.body);
+    if (!p.success)
+        return res.status(400).json({ error: 'INVALID_AI_REQUEST', details: p.error.flatten() });
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey)
+        return res.status(503).json({ error: 'AI_TEXT_PROVIDER_NOT_CONFIGURED' });
+    const instructions = {
+        CORRECT: 'Correggi grammatica, ortografia e punteggiatura mantenendo il significato e lo stile personale.',
+        RHYME: 'Migliora le rime e gli incastri mantenendo il significato, evitando rime banali o ripetitive.',
+        SINGABLE: 'Rendi il testo più cantabile, fluido e naturale, con frasi adatte a essere cantate.',
+        POWERFUL: 'Rendi il testo più potente, incisivo ed emozionante mantenendo il messaggio originale.',
+        SHORTEN: 'Accorcia il testo mantenendo il messaggio, le parti più importanti e le immagini migliori.',
+        LENGTHEN: 'Allunga il testo aggiungendo contenuto coerente senza riempitivi o ripetizioni inutili.',
+        ADAPT_STYLE: 'Adatta il testo allo stile musicale indicato, mantenendo il significato e rendendolo coerente con quel genere.',
+        REWRITE: 'Riscrivi il testo in modo creativo mantenendo il tema e il messaggio principale.'
+    };
+    const instruction = instructions[p.data.action];
+    const system = [
+        'Sei un autore musicale professionale e un editor di testi.',
+        'Lavora esclusivamente sul testo fornito dall’utente.',
+        'Non aggiungere spiegazioni, introduzioni, virgolette o commenti.',
+        'Restituisci esclusivamente il testo musicale elaborato.',
+        `Operazione richiesta: ${instruction}`,
+        `Stile musicale richiesto: ${p.data.style}`
+    ].join('\n');
+    try {
+        const response = await fetch('https://api.openai.com/v1/responses', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: 'gpt-5.6-luna',
+                input: [
+                    { role: 'system', content: system },
+                    { role: 'user', content: p.data.text }
+                ],
+                max_output_tokens: 4000
+            })
+        });
+        const raw = await response.text();
+        if (!response.ok)
+            return res.status(502).json({ error: 'AI_TEXT_PROVIDER_ERROR', status: response.status });
+        const data = JSON.parse(raw);
+        const text = typeof data.output_text === 'string'
+            ? data.output_text.trim()
+            : Array.isArray(data.output)
+                ? data.output.flatMap((item) => Array.isArray(item.content) ? item.content : []).map((c) => c.text ?? '').join('').trim()
+                : '';
+        if (!text)
+            return res.status(502).json({ error: 'AI_EMPTY_RESPONSE' });
+        return res.json({ text });
+    }
+    catch {
+        return res.status(502).json({ error: 'AI_TEXT_REQUEST_FAILED' });
+    }
+});
 app.post('/v1/auth/register', async (req, res) => { const p = credentials.safeParse(req.body); if (!p.success)
     return res.status(400).json({ error: 'INVALID_REQUEST' }); if (!pool)
     return res.status(503).json({ error: 'DATABASE_NOT_CONFIGURED' }); try {
@@ -259,9 +323,7 @@ app.get('/v1/assets/:jobId', auth, async (req, res) => {
     if (/^https?:\/\//i.test(raw) && !raw.startsWith(internalPrefix)) {
         return res.redirect(302, raw);
     }
-    const filename = raw.startsWith(internalPrefix)
-        ? decodeURIComponent(new URL(raw).pathname.split('/').pop() ?? '')
-        : path.basename(raw);
+    const filename = `${req.params.jobId}.wav`;
     const file = path.join(assetsDir, filename);
     if (!existsSync(file) || !filename || filename !== path.basename(filename))
         return res.status(404).json({ error: 'ASSET_FILE_NOT_FOUND' });
