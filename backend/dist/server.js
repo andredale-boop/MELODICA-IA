@@ -41,7 +41,7 @@ function verifyPassword(password, stored) { const [kind, salt, hash] = stored.sp
 const credentials = z.object({ email: z.string().email().max(254), password: z.string().min(8).max(128) });
 const aiRewriteSchema = z.object({
     text: z.string().min(1).max(12000),
-    action: z.enum(['CORRECT', 'RHYME', 'SINGABLE', 'POWERFUL', 'SHORTEN', 'LENGTHEN', 'ADAPT_STYLE', 'REWRITE']),
+    action: z.enum(['CORRECT', 'RHYME', 'SINGABLE', 'POWERFUL', 'SHORTEN', 'LENGTHEN', 'ADAPT_STYLE', 'REWRITE', 'FULL_SONG']),
     style: z.string().min(1).max(200).default('Pop')
 });
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'melodica-api', version: '1.4.0' }));
@@ -60,7 +60,8 @@ app.post('/v1/ai/rewrite', auth, async (req, res) => {
         SHORTEN: 'Accorcia il testo mantenendo il messaggio, le parti più importanti e le immagini migliori.',
         LENGTHEN: 'Allunga il testo aggiungendo contenuto coerente senza riempitivi o ripetizioni inutili.',
         ADAPT_STYLE: 'Adatta il testo allo stile musicale indicato, mantenendo il significato e rendendolo coerente con quel genere.',
-        REWRITE: 'Riscrivi il testo in modo creativo mantenendo il tema e il messaggio principale.'
+        REWRITE: 'Riscrivi il testo in modo creativo mantenendo il tema e il messaggio principale.',
+        FULL_SONG: 'Trasforma l\'idea o il testo fornito in un brano musicale completo e originale. Sviluppa il tema senza limitarti a correggere o parafrasare il testo iniziale. Crea una struttura professionale con [Intro], [Strofa 1], [Pre-Chorus], [Ritornello], [Strofa 2], [Pre-Chorus], [Ritornello], [Bridge], [Ritornello Finale] e [Outro]. Il brano deve essere abbastanza lungo da poter essere utilizzato come testo completo per una canzone. Mantieni il significato dell\'idea originale e adatta lessico, metrica, immagini e atmosfera allo stile musicale richiesto.'
     };
     const instruction = instructions[p.data.action];
     const system = [
@@ -68,6 +69,7 @@ app.post('/v1/ai/rewrite', auth, async (req, res) => {
         'Lavora esclusivamente sul testo fornito dall’utente.',
         'Non aggiungere spiegazioni, introduzioni, virgolette o commenti.',
         'Restituisci esclusivamente il testo musicale elaborato.',
+        'Quando l\'operazione è FULL_SONG, produci un brano completo e sostanzioso, non una semplice revisione della frase ricevuta.',
         `Operazione richiesta: ${instruction}`,
         `Stile musicale richiesto: ${p.data.style}`
     ].join('\n');
